@@ -24,7 +24,7 @@ type GrpcKubeBalancer interface {
 
 type connection struct {
 	nConnections   int32 // The number of connections
-	functions      *GrpcKubeBalancer
+	functions      GrpcKubeBalancer
 	grpcConnection []*grpcConnection
 }
 
@@ -80,7 +80,7 @@ func healthCheck() {
 	for _, v := range connectionCache {
 		// Iterate over the connections while calling the provided ping function
 		for _, c := range v.grpcConnection {
-			err := (*v.functions).Ping(c.grpcConnection)
+			err := v.functions.Ping(c.grpcConnection)
 			if err != nil {
 				// Add to dirtyConnections channel:
 				dirtyConnections <- c
@@ -94,6 +94,7 @@ func healthCheck() {
 
 // cleanConnections - Processes the connections which are stale/can not be reached and removes them from the cache
 func cleanConnections(dirtyConnections chan *grpcConnection) {
+	// Not using a channel for this since we want unique services to be updated only (And the map deduplicates the list automatically
 	updateList := make(map[string]*connection)
 	for v := range dirtyConnections {
 		conns := connectionCache[v.serviceName]
@@ -126,7 +127,7 @@ func updatePool() {
 }
 
 // Connect - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
-func Connect(serviceName, namespace string, f *GrpcKubeBalancer) (interface{}, error) {
+func Connect(serviceName, namespace string, f GrpcKubeBalancer) (interface{}, error) {
 	currentCache := connectionCache[serviceName]
 	if currentCache == nil {
 		conn := getConnectionPool(serviceName, namespace, f)
@@ -137,7 +138,7 @@ func Connect(serviceName, namespace string, f *GrpcKubeBalancer) (interface{}, e
 }
 
 // getConnectionPool - Builds up a connection pool, initializes pool when absent, returns a pool
-func getConnectionPool(serviceName, namespace string, f *GrpcKubeBalancer) *connection {
+func getConnectionPool(serviceName, namespace string, f GrpcKubeBalancer) *connection {
 	currentCache := connectionCache[serviceName]
 	if currentCache == nil {
 		c := &connection{
@@ -152,7 +153,7 @@ func getConnectionPool(serviceName, namespace string, f *GrpcKubeBalancer) *conn
 	return currentCache
 }
 
-func updateConnectionPool(serviceName, namespace string, f *GrpcKubeBalancer, currentCache *connection) *connection {
+func updateConnectionPool(serviceName, namespace string, f GrpcKubeBalancer, currentCache *connection) *connection {
 	svc, _ := getService(serviceName, namespace, clientset.CoreV1())
 	pods, _ := getPodsForSvc(svc, namespace, clientset.CoreV1())
 	for _, pod := range pods.Items {
@@ -164,7 +165,7 @@ func updateConnectionPool(serviceName, namespace string, f *GrpcKubeBalancer, cu
 			}
 		}
 		conn, err := grpc.Dial(pod.Status.PodIP, grpc.WithInsecure())
-		grpcConn, err := (*currentCache.functions).NewGrpcClient(conn)
+		grpcConn, err := currentCache.functions.NewGrpcClient(conn)
 		if err != nil {
 			// Connection could not be made, so abort, but still try next pods in list
 			continue
