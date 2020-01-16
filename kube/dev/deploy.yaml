@@ -1,0 +1,46 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: grpc-kube
+  namespace: inca
+spec:
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      name: grpc-kube
+      labels:
+        app: grpc-kube
+    spec:
+      initContainers:
+      - name: init-dev
+        image: alpine
+        command:
+          [
+            "sh",
+            "-c",
+            "/usr/bin/wget -O /opt/app https://storage.googleapis.com/dev-apps/grpc-kube/app &> /opt/download.log || true; chmod +x /opt/app",
+          ]
+        volumeMounts:
+        - name: application
+          mountPath: /opt
+      containers:
+      - name: grpc-kube
+        image: gcr.io/adacado1/go-kafkacontainer:1.13
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "/opt/app"]
+        resources:
+          requests:
+            cpu: 5m
+            memory: 10Mi
+          limits:
+            cpu: 1000m
+            memory: 200Mi
+        volumeMounts:
+        - name: application
+          mountPath: /opt/
+      volumes:
+      - name: application
+        emptyDir: {}
