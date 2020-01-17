@@ -2,6 +2,7 @@ package kubegrpc
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"math/rand"
 	"strings"
@@ -32,7 +33,6 @@ type grpcConnection struct {
 	grpcConnection interface{}
 	connectionIP   string
 	serviceName    string
-	namespace      string
 }
 
 var (
@@ -114,7 +114,7 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 	}
 	// Found connections in channel?
 	for k, v := range updateList {
-		updateConnectionPool(k, v.grpcConnection[0].namespace, v.functions, v)
+		updateConnectionPool(k, v.functions, v)
 	}
 }
 
@@ -122,24 +122,24 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 func updatePool() {
 	time.Sleep(time.Minute)
 	for k, v := range connectionCache {
-		updateConnectionPool(k, v.grpcConnection[0].namespace, v.functions, v)
+		updateConnectionPool(k, v.functions, v)
 	}
 }
 
 // Connect - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
-func Connect(serviceName, namespace string, f GrpcKubeBalancer) (interface{}, error) {
+func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 	currentCache := connectionCache[serviceName]
 	if currentCache == nil {
-		currentCache = getConnectionPool(serviceName, namespace, f)
+		currentCache = getConnectionPool(serviceName, f)
 	}
 	grcpConn := currentCache.grpcConnection[rand.Int31n(currentCache.nConnections)]
 	return grcpConn.grpcConnection, nil
 }
 
 // getConnectionPool - Initializes pool when absent, returns a pool
-func getConnectionPool(serviceName, namespace string, f GrpcKubeBalancer) *connection {
+func getConnectionPool(serviceName string, f GrpcKubeBalancer) *connection {
 	currentCache := connectionCache[serviceName]
-	log.Printf("INFO: getConnectionPool(): service %s, namespace %s: pool %v", serviceName, namespace, currentCache)
+	log.Printf("INFO: getConnectionPool(): service %s, namespace %s: pool %v", serviceName, currentCache)
 	if currentCache == nil {
 		c := &connection{
 			nConnections:   0,
@@ -148,21 +148,26 @@ func getConnectionPool(serviceName, namespace string, f GrpcKubeBalancer) *conne
 		}
 		connectionCache[serviceName] = c
 		currentCache = connectionCache[serviceName]
-		return updateConnectionPool(serviceName, namespace, f, currentCache)
+		return updateConnectionPool(serviceName, f, currentCache)
 	}
 	return currentCache
 }
 
-func updateConnectionPool(serviceName, namespace string, f GrpcKubeBalancer, currentCache *connection) *connection {
-	svc, _ := getService(serviceName, namespace, clientset.CoreV1())
+func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *connection) *connection {
+	svc, namespace, _ := getService(serviceName, clientset.CoreV1())
 	pods, _ := getPodsForSvc(svc, namespace, clientset.CoreV1())
 	for _, pod := range pods.Items {
 		// Check pool for  presense of podIP to prevent duplicate connections:
+		ipFound := false
 		for _, p := range currentCache.grpcConnection {
 			if p.connectionIP == pod.Status.PodIP {
-				// Ip found, connection alreay present, continue with the next pod:
-				continue
+				ipFound = true
+				break
 			}
+		}
+		if ipFound {
+			// Ip found, connection alreay present, continue with the next pod:
+			continue
 		}
 		portSlice := strings.Split(serviceName, ":")
 		if len(portSlice) < 2 {
@@ -178,7 +183,6 @@ func updateConnectionPool(serviceName, namespace string, f GrpcKubeBalancer, cur
 		gc := &grpcConnection{
 			connectionIP:   pod.Status.PodIP,
 			grpcConnection: grpcConn,
-			namespace:      namespace,   // Added to make use of channel for cleaning up connections easier
 			serviceName:    serviceName, // Added to make use of channel for cleaning up connections easier
 		}
 		currentCache.nConnections = currentCache.nConnections + 1
@@ -189,8 +193,13 @@ func updateConnectionPool(serviceName, namespace string, f GrpcKubeBalancer, cur
 	return currentCache
 }
 
-func getService(serviceName string, namespace string, k8sClient typev1.CoreV1Interface) (*corev1.Service, error) {
+func getService(serviceName string, k8sClient typev1.CoreV1Interface) (*corev1.Service, string, error) {
 	listOptions := metav1.ListOptions{}
+	serviceSlice := strings.Split(serviceName, ".")
+	if len(serviceSlice) < 2 {
+		return nil, "", fmt.Errorf("Service name not according to convention defined in README. Service name: %s", serviceName)
+	}
+	namespace := serviceSlice[1]
 	svcs, err := k8sClient.Services(namespace).List(listOptions)
 	if err != nil {
 		log.Fatal(err)
@@ -198,10 +207,10 @@ func getService(serviceName string, namespace string, k8sClient typev1.CoreV1Int
 	svcComponents := strings.Split(serviceName, ".")
 	for _, svc := range svcs.Items {
 		if strings.Contains(svc.Name, svcComponents[0]) {
-			return &svc, nil
+			return &svc, namespace, nil
 		}
 	}
-	return nil, errors.New("cannot find service")
+	return nil, namespace, errors.New("cannot find service")
 }
 
 func getPodsForSvc(svc *corev1.Service, namespace string, k8sClient typev1.CoreV1Interface) (*corev1.PodList, error) {

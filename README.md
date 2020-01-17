@@ -15,7 +15,7 @@ The project has been used in several dozen code bases before being made publicly
 
 ## Usage
 
-To use the package, the developer has to implement the interface `GrpcKubeBalancer`. 
+To use the package, the developer has to implement the interface `GrpcKubeBalancer`.
 By passing the interface implementation to the `Connect` function, the connection management process will start. `Connect` can be called multiple times for different connections. The package handles the connections internally in a map in which the key is the service name. THe input service name expected is the servicename in FQDN notation including connection port (eg `abc.ns.svc.local:10000`).
 
 ### Requirements
