@@ -130,16 +130,16 @@ func updatePool() {
 func Connect(serviceName, namespace string, f GrpcKubeBalancer) (interface{}, error) {
 	currentCache := connectionCache[serviceName]
 	if currentCache == nil {
-		conn := getConnectionPool(serviceName, namespace, f)
-		grcpConn := conn.grpcConnection[rand.Int31n(conn.nConnections)]
-		return grcpConn, nil
+		currentCache = getConnectionPool(serviceName, namespace, f)
 	}
-	return nil, nil
+	grcpConn := currentCache.grpcConnection[rand.Int31n(currentCache.nConnections)]
+	return grcpConn.grpcConnection, nil
 }
 
-// getConnectionPool - Builds up a connection pool, initializes pool when absent, returns a pool
+// getConnectionPool - Initializes pool when absent, returns a pool
 func getConnectionPool(serviceName, namespace string, f GrpcKubeBalancer) *connection {
 	currentCache := connectionCache[serviceName]
+	log.Printf("INFO: getConnectionPool(): service %s, namespace %s: pool %v", serviceName, namespace, currentCache)
 	if currentCache == nil {
 		c := &connection{
 			nConnections:   0,
@@ -164,7 +164,11 @@ func updateConnectionPool(serviceName, namespace string, f GrpcKubeBalancer, cur
 				continue
 			}
 		}
-		conn, err := grpc.Dial(pod.Status.PodIP, grpc.WithInsecure())
+		portSlice := strings.Split(serviceName, ":")
+		if len(portSlice) < 2 {
+			log.Fatalf("updateConnectionPool(): No port number supplied in service as stated in README")
+		}
+		conn, err := grpc.Dial(pod.Status.PodIP+":"+portSlice[1], grpc.WithInsecure())
 		grpcConn, err := currentCache.functions.NewGrpcClient(conn)
 		if err != nil {
 			// Connection could not be made, so abort, but still try next pods in list
@@ -179,6 +183,8 @@ func updateConnectionPool(serviceName, namespace string, f GrpcKubeBalancer, cur
 		}
 		currentCache.nConnections = currentCache.nConnections + 1
 		currentCache.grpcConnection = append(currentCache.grpcConnection, gc)
+		log.Printf("INFO: updateConnectionPool(): Created connection for service %s in namespace %s. Connection pool status %v", serviceName, namespace, currentCache)
+		connectionCache[serviceName] = currentCache
 	}
 	return currentCache
 }
