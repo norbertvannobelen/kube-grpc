@@ -189,8 +189,9 @@ func getService(serviceName string, namespace string, k8sClient typev1.CoreV1Int
 	if err != nil {
 		log.Fatal(err)
 	}
+	svcComponents := strings.Split(serviceName, ".")
 	for _, svc := range svcs.Items {
-		if strings.Contains(svc.Name, serviceName) {
+		if strings.Contains(svc.Name, svcComponents[0]) {
 			return &svc, nil
 		}
 	}
