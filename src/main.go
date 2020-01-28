@@ -159,9 +159,18 @@ func getConnectionPool(serviceName string, f GrpcKubeBalancer) *connection {
 }
 
 func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *connection) *connection {
-	svc, namespace, _ := getService(serviceName, clientset.CoreV1())
-	pods, _ := getPodsForSvc(svc, namespace, clientset.CoreV1())
+	svc, namespace, err := getService(serviceName, clientset.CoreV1())
+	if err != nil {
+		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Error %v", serviceName, err)
+		return nil
+	}
+	pods, podErr := getPodsForSvc(svc, namespace, clientset.CoreV1())
+	if podErr != nil {
+		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Can not get pods. Error %v", serviceName, err)
+		return nil
+	}
 
+	log.Printf("INFO: pods %v found for service %s", pods, serviceName)
 	// Evict from pool
 	for _, p := range currentCache.grpcConnection {
 		dirtyConnections := make(chan *grpcConnection)
