@@ -121,9 +121,9 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 // updatePool - Every minute a full scan is done to check for new pods which might have been scaled into the pool
 func updatePool() {
 	time.Sleep(time.Minute)
-	for k, v := range connectionCache {
+	for serviceName, v := range connectionCache {
 		log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
-		updateConnectionPool(k, v.functions, v)
+		updateConnectionPool(serviceName, v.functions, v)
 	}
 }
 
