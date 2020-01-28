@@ -122,6 +122,7 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 func updatePool() {
 	time.Sleep(time.Minute)
 	for k, v := range connectionCache {
+		log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
 		updateConnectionPool(k, v.functions, v)
 	}
 }
@@ -133,6 +134,7 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 		currentCache = getConnectionPool(serviceName, f)
 	}
 	grcpConn := currentCache.grpcConnection[rand.Int31n(currentCache.nConnections)]
+	log.Printf("INFO: Connect(): Chatting for service %s through grpc connection %v", serviceName, grcpConn)
 	return grcpConn.grpcConnection, nil
 }
 
