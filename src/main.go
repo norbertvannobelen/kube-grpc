@@ -73,23 +73,25 @@ func poolManager() {
 // If a connection has failed, the connection is removed from the pool and a scan is executed for new connections.
 // Currently there is no
 func healthCheck() {
-	time.Sleep(time.Second)
-	// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
-	dirtyConnections := make(chan *grpcConnection)
-	// The connections are a global variable
-	for _, v := range connectionCache {
-		// Iterate over the connections while calling the provided ping function
-		for _, c := range v.grpcConnection {
-			err := v.functions.Ping(c.grpcConnection)
-			if err != nil {
-				// Add to dirtyConnections channel:
-				dirtyConnections <- c
+	for {
+		time.Sleep(time.Second)
+		// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
+		dirtyConnections := make(chan *grpcConnection)
+		// The connections are a global variable
+		for _, v := range connectionCache {
+			// Iterate over the connections while calling the provided ping function
+			for _, c := range v.grpcConnection {
+				err := v.functions.Ping(c.grpcConnection)
+				if err != nil {
+					// Add to dirtyConnections channel:
+					dirtyConnections <- c
+				}
 			}
 		}
+		// Activate the listener to process the changes
+		close(dirtyConnections)
+		go cleanConnections(dirtyConnections)
 	}
-	// Activate the listener to process the changes
-	close(dirtyConnections)
-	go cleanConnections(dirtyConnections)
 }
 
 // cleanConnections - Processes the connections which are stale/can not be reached and removes them from the cache
@@ -120,10 +122,12 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 
 // updatePool - Every minute a full scan is done to check for new pods which might have been scaled into the pool
 func updatePool() {
-	time.Sleep(time.Minute)
-	for serviceName, v := range connectionCache {
-		log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
-		updateConnectionPool(serviceName, v.functions, v)
+	for {
+		time.Sleep(time.Minute)
+		for serviceName, v := range connectionCache {
+			log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
+			updateConnectionPool(serviceName, v.functions, v)
+		}
 	}
 }
 
