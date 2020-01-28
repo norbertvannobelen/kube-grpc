@@ -88,7 +88,6 @@ func healthCheck() {
 				}
 			}
 		}
-		// Activate the listener to process the changes
 		close(dirtyConnections)
 		go cleanConnections(dirtyConnections)
 	}
@@ -100,7 +99,7 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 	updateList := make(map[string]*connection)
 	for v := range dirtyConnections {
 		conns := connectionCache[v.serviceName]
-		// Add connection to list so that it can be used to update the existing pools
+		// Add connection to list so that it can be used to update the existing pools (Pool is found to have dead connections, there could be new pods too)
 		updateList[v.serviceName] = conns
 		for k, gc := range conns.grpcConnection {
 			if gc == v {
@@ -195,6 +194,22 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 		currentCache.grpcConnection = append(currentCache.grpcConnection, gc)
 		log.Printf("INFO: updateConnectionPool(): Created connection for service %s in namespace %s. Connection pool status %v", serviceName, namespace, currentCache)
 		connectionCache[serviceName] = currentCache
+	}
+	// Evict from pool
+	for _, p := range currentCache.grpcConnection {
+		dirtyConnections := make(chan *grpcConnection)
+		evict := true
+		for _, pod := range pods.Items {
+			if p.connectionIP == pod.Status.PodIP {
+				evict = false
+				break
+			}
+		}
+		if evict {
+			dirtyConnections <- p
+		}
+		close(dirtyConnections)
+		go cleanConnections(dirtyConnections)
 	}
 	return currentCache
 }
