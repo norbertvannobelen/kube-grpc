@@ -52,14 +52,6 @@ func init() {
 	poolManager()
 }
 
-func main() {
-	// List ips from service to connect to:
-	// serviceName := "elasticsearch-data"
-	// svc, _ := getService(serviceName, "inca", clientset.CoreV1())
-	// pods, _ := getPodsForSvc(svc, "inca", clientset.CoreV1())
-	// buildConnections(serviceName, pods)
-}
-
 // poolManager - Updates the existing connection pools, keeps the pools healthy
 // Runs once per second in which it pings existing connections.
 // If a connection has failed, the connection is removed from the pool and a scan is executed for new connections.
@@ -76,20 +68,26 @@ func healthCheck() {
 	for {
 		time.Sleep(time.Second)
 		// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
-		dirtyConnections := make(chan *grpcConnection)
 		// The connections are a global variable
+		healthy := true
 		for _, v := range connectionCache {
 			// Iterate over the connections while calling the provided ping function
+			dirtyConnections := make(chan *grpcConnection, len(v.grpcConnection))
 			for _, c := range v.grpcConnection {
 				err := v.functions.Ping(c.grpcConnection)
 				if err != nil {
 					// Add to dirtyConnections channel:
 					dirtyConnections <- c
+					healthy = false
 				}
 			}
+			close(dirtyConnections)
+			cleanConnections(dirtyConnections)
 		}
-		close(dirtyConnections)
-		go cleanConnections(dirtyConnections)
+		if !healthy {
+			// TODO: What about triggering a check for new connections in case we had a health issue
+			log.Printf("INFO: healthCheck(): Healthy? %t", healthy)
+		}
 	}
 }
 
@@ -112,10 +110,6 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 				break
 			}
 		}
-	}
-	// Found connections in channel?
-	for k, v := range updateList {
-		updateConnectionPool(k, v.functions, v)
 	}
 }
 
@@ -144,7 +138,7 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 // getConnectionPool - Initializes pool when absent, returns a pool
 func getConnectionPool(serviceName string, f GrpcKubeBalancer) *connection {
 	currentCache := connectionCache[serviceName]
-	log.Printf("INFO: getConnectionPool(): service %s, namespace %s: pool %v", serviceName, currentCache)
+	log.Printf("INFO: getConnectionPool(): service %s, pool %v", serviceName, currentCache)
 	if currentCache == nil {
 		c := &connection{
 			nConnections:   0,
@@ -170,9 +164,9 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 		return nil
 	}
 
-	log.Printf("INFO: updateConnectionPool(): pods %d found for service %s", len(pods.Items), serviceName)
+	log.Printf("INFO: updateConnectionPool(): #pods: %d found for service %s", len(pods.Items), serviceName)
 	// Evict from pool
-	dirtyConnections := make(chan *grpcConnection)
+	dirtyConnections := make(chan *grpcConnection, len(currentCache.grpcConnection))
 	for _, p := range currentCache.grpcConnection {
 		evict := true
 		for _, pod := range pods.Items {
@@ -181,12 +175,12 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 				break
 			}
 		}
+		log.Printf("INFO: Evicting %s for service %s? %t", p.connectionIP, p.serviceName, evict)
 		if evict {
 			dirtyConnections <- p
 		}
 	}
 	close(dirtyConnections)
-	log.Printf("INFO: updateConnectionPool(): About to clean connections")
 	cleanConnections(dirtyConnections)
 	log.Printf("INFO: updateConnectionPool(): After evict pool for service %s in namespace %s: %v", serviceName, namespace, currentCache)
 
