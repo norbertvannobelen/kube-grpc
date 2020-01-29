@@ -170,7 +170,7 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 		return nil
 	}
 
-	log.Printf("INFO: pods %v found for service %s", pods, serviceName)
+	log.Printf("INFO: updateConnectionPool(): pods %d found for service %s", len(pods.Items), serviceName)
 	// Evict from pool
 	dirtyConnections := make(chan *grpcConnection)
 	for _, p := range currentCache.grpcConnection {
@@ -186,6 +186,7 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 		}
 	}
 	close(dirtyConnections)
+	log.Printf("INFO: updateConnectionPool(): About to clean connections")
 	cleanConnections(dirtyConnections)
 	log.Printf("INFO: updateConnectionPool(): After evict pool for service %s in namespace %s: %v", serviceName, namespace, currentCache)
 
