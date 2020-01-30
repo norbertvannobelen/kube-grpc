@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -24,7 +25,7 @@ type GrpcKubeBalancer interface {
 }
 
 type connection struct {
-	nConnections   int32 // The number of connections
+	nConnections   int // The number of connections
 	functions      GrpcKubeBalancer
 	grpcConnection []*grpcConnection
 }
@@ -75,8 +76,11 @@ func healthCheck() {
 			dirtyConnections := make(chan *grpcConnection, len(v.grpcConnection))
 			for _, c := range v.grpcConnection {
 				err := v.functions.Ping(c.grpcConnection)
+				// log.Printf("INFO: healthCheck(): Ping %s at %s. Error %v", c.serviceName, c.connectionIP, err)
 				if err != nil {
 					// Add to dirtyConnections channel:
+					log.Printf("INFO: healthcheck(): Pinging %d services with %d pods failed to ping %s at ip %s",
+						len(connectionCache), len(v.grpcConnection), c.serviceName, c.connectionIP)
 					dirtyConnections <- c
 					healthy = false
 				}
@@ -94,22 +98,27 @@ func healthCheck() {
 // cleanConnections - Processes the connections which are stale/can not be reached and removes them from the cache
 func cleanConnections(dirtyConnections chan *grpcConnection) {
 	// Not using a channel for this since we want unique services to be updated only (And the map deduplicates the list automatically
-	updateList := make(map[string]*connection)
 	for v := range dirtyConnections {
+		pool := ""
 		conns := connectionCache[v.serviceName]
-		// Add connection to list so that it can be used to update the existing pools (Pool is found to have dead connections, there could be new pods too)
-		updateList[v.serviceName] = conns
+		// healthCheck and updatePool could both run this routine at the same time, leading to a change on range conns.grpcConnection
+		// and subsequent non-existent just found key. mutex.Lock should protect this code against race conditions.
+		var mutex = &sync.Mutex{}
+		mutex.Lock()
 		for k, gc := range conns.grpcConnection {
 			if gc == v {
 				// Remove connection from slice of connections
 				a := conns.grpcConnection
-				conns.nConnections = conns.nConnections - 1
 				a[k] = a[len(a)-1]
 				a = a[:len(a)-1]
+				conns.nConnections = len(a)
+				conns.grpcConnection = a
 				// Value found, so no need (and very unwanted) to continue iteration since we effectively changed the iterator of the for inner for loop
 				break
 			}
 		}
+		mutex.Unlock()
+		log.Printf("INFO: cleanConnections(): Pool %s after clean: %v", pool, conns)
 	}
 }
 
@@ -127,18 +136,7 @@ func updatePool() {
 // Connect - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
 func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 	currentCache := connectionCache[serviceName]
-	if currentCache == nil {
-		currentCache = getConnectionPool(serviceName, f)
-	}
-	grcpConn := currentCache.grpcConnection[rand.Int31n(currentCache.nConnections)]
-	log.Printf("INFO: Connect(): Chatting with service %s through grpc connection %v", serviceName, grcpConn)
-	return grcpConn.grpcConnection, nil
-}
-
-// getConnectionPool - Initializes pool when absent, returns a pool
-func getConnectionPool(serviceName string, f GrpcKubeBalancer) *connection {
-	currentCache := connectionCache[serviceName]
-	log.Printf("INFO: getConnectionPool(): service %s, pool %v", serviceName, currentCache)
+	log.Printf("INFO: Connect(): service %s, pool %v", serviceName, currentCache)
 	if currentCache == nil {
 		c := &connection{
 			nConnections:   0,
@@ -146,10 +144,11 @@ func getConnectionPool(serviceName string, f GrpcKubeBalancer) *connection {
 			grpcConnection: make([]*grpcConnection, 0),
 		}
 		connectionCache[serviceName] = c
-		currentCache = connectionCache[serviceName]
-		return updateConnectionPool(serviceName, f, currentCache)
+		currentCache = updateConnectionPool(serviceName, f, c)
 	}
-	return currentCache
+	grcpConn := currentCache.grpcConnection[rand.Intn(currentCache.nConnections)]
+	log.Printf("INFO: Connect(): Chatting with service %s through grpc connection %+v", serviceName, grcpConn)
+	return grcpConn.grpcConnection, nil
 }
 
 func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *connection) *connection {
@@ -171,18 +170,19 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 		evict := true
 		for _, pod := range pods.Items {
 			if p.connectionIP == pod.Status.PodIP {
+				log.Printf("INFO: updateConnectionPool(): Not evicting %s for %s", p.connectionIP, p.serviceName)
 				evict = false
 				break
 			}
 		}
-		log.Printf("INFO: Evicting %s for service %s? %t", p.connectionIP, p.serviceName, evict)
 		if evict {
+			log.Printf("INFO: updateConnectionPool(): Evicting %s for %s", p.connectionIP, p.serviceName)
 			dirtyConnections <- p
 		}
 	}
 	close(dirtyConnections)
 	cleanConnections(dirtyConnections)
-	log.Printf("INFO: updateConnectionPool(): After evict pool for service %s in namespace %s: %v", serviceName, namespace, currentCache)
+	log.Printf("INFO: updateConnectionPool(): After evict pool for service %s in namespace %s: %+v", serviceName, namespace, currentCache)
 
 	// Add new connections to pool
 	for _, pod := range pods.Items {
@@ -214,10 +214,10 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 			grpcConnection: grpcConn,
 			serviceName:    serviceName, // Added to make use of channel for cleaning up connections easier
 		}
-		currentCache.nConnections = currentCache.nConnections + 1
 		currentCache.grpcConnection = append(currentCache.grpcConnection, gc)
-		log.Printf("INFO: updateConnectionPool(): Created connection for service %s in namespace %s. Connection pool status %v", serviceName, namespace, currentCache)
+		currentCache.nConnections = len(currentCache.grpcConnection)
 		connectionCache[serviceName] = currentCache
+		log.Printf("INFO: updateConnectionPool(): Created connection for service %s in namespace %s. Connection pool status %+v", serviceName, namespace, currentCache)
 	}
 	return currentCache
 }
