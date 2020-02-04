@@ -7,6 +7,6 @@ require (
 	k8s.io/klog v1.0.0
 )
 
-module github.com/norbertvannobelen/kube-grpc/src
+module github.com/norbertvannobelen/kube-grpc
 
 go 1.13
