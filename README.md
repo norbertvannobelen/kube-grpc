@@ -9,6 +9,16 @@ Kubernetes grpc round robin load balancer and availability connector.
 * Cache connections to create connection pool from which connections are handed out;
 * Automatic refresh of connection pool to account for autoscaling environments, pod updates and pod crashes.
 
+## Versioning
+
+Since the k8s API is used, the minor version in the release number has been used to indicate the k8s minor version used to build & test with.
+
+## k8s compatibility
+
+### Release 1.17.x
+
+Release 1.17.x have been tested with k8s 1.13. to 1.17 and no issues have been observed.
+
 ## Project state
 
 The project has been used in several dozen code bases before being made publicly available, thus adding some real world use and test experience.

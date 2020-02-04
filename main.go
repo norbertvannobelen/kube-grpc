@@ -42,6 +42,7 @@ var (
 )
 
 func init() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Fatalf("ERROR: init(): Could not get kube config in cluster. Error:" + err.Error())
@@ -70,27 +71,20 @@ func healthCheck() {
 		time.Sleep(time.Second)
 		// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
 		// The connections are a global variable
-		healthy := true
 		for _, v := range connectionCache {
 			// Iterate over the connections while calling the provided ping function
 			dirtyConnections := make(chan *grpcConnection, len(v.grpcConnection))
 			for _, c := range v.grpcConnection {
 				err := v.functions.Ping(c.grpcConnection)
-				// log.Printf("INFO: healthCheck(): Ping %s at %s. Error %v", c.serviceName, c.connectionIP, err)
 				if err != nil {
 					// Add to dirtyConnections channel:
 					log.Printf("INFO: healthcheck(): Pinging %d services with %d pods failed to ping %s at ip %s",
 						len(connectionCache), len(v.grpcConnection), c.serviceName, c.connectionIP)
 					dirtyConnections <- c
-					healthy = false
 				}
 			}
 			close(dirtyConnections)
 			cleanConnections(dirtyConnections)
-		}
-		if !healthy {
-			// TODO: What about triggering a check for new connections in case we had a health issue
-			log.Printf("INFO: healthCheck(): Healthy? %t", healthy)
 		}
 	}
 }
@@ -136,7 +130,6 @@ func updatePool() {
 // Connect - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
 func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 	currentCache := connectionCache[serviceName]
-	log.Printf("INFO: Connect(): service %s, pool %v", serviceName, currentCache)
 	if currentCache == nil {
 		c := &connection{
 			nConnections:   0,
