@@ -28,6 +28,51 @@ The project has been used in several dozen code bases before being made publicly
 To use the package, the developer has to implement the interface `GrpcKubeBalancer`.
 By passing the interface implementation to the `Connect` function, the connection management process will start. `Connect` can be called multiple times for different connections. The package handles the connections internally in a map in which the key is the service name. THe input service name expected is the servicename in FQDN notation including connection port (eg `abc.ns.svc.local:10000`).
 
+### Usage example
+
+Implement in the grpc interface the following function:
+
+```proto3
+   rpc Ping(Pong) returns (Pong) {}
+
+   message Pong {
+       string Pong = 1; // Pong can be any indepth message for further in depth considerations like resend on failure
+   }
+```
+
+Implement the interface with the call back functions:
+
+```go
+type i struct{}
+var iFunctions:=&i{} // This is send in every call to the kube-grpc package
+
+// NewGrpcClient - Implementation requirement for connection pool
+func (*i) NewGrpcClient(conn *grpc.ClientConn) (interface{}, error) {
+	return someGrpc.NewSomeGrpcClient(conn), nil
+}
+
+// Ping - Implementation requirement for connection pool
+func (*i) Ping(grpcConnection interface{}) error {
+	// Cast interface to connection
+	pinger := grpcConnection.(someGrpc.SomeGrpcClient)
+	// Ping - Can be any function in the grpc interface
+	_, err := pinger.Ping(context.Background(), &someGrpc.Pong{})
+	return err
+}
+```
+
+Use the connection package by using the `Connect` function:
+
+```go
+func someGrpcConnect() (someGrpc.someGrpcClient, error) {
+	conn, err := kubegrpc.Connect("service-address.namespace.svc.cluster.local:portnumber", iFunctions)
+	if err != nil {
+		return nil, err
+	}
+	return conn.(someGrpc.SomeGrpcClient), nil
+}
+```
+
 ### Requirements
 
 The package requires access to k8s to get the services from.

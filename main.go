@@ -93,7 +93,6 @@ func healthCheck() {
 func cleanConnections(dirtyConnections chan *grpcConnection) {
 	// Not using a channel for this since we want unique services to be updated only (And the map deduplicates the list automatically
 	for v := range dirtyConnections {
-		pool := ""
 		conns := connectionCache[v.serviceName]
 		// healthCheck and updatePool could both run this routine at the same time, leading to a change on range conns.grpcConnection
 		// and subsequent non-existent just found key. mutex.Lock should protect this code against race conditions.
@@ -102,17 +101,15 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 		for k, gc := range conns.grpcConnection {
 			if gc == v {
 				// Remove connection from slice of connections
-				a := conns.grpcConnection
-				a[k] = a[len(a)-1]
-				a = a[:len(a)-1]
-				conns.nConnections = len(a)
-				conns.grpcConnection = a
+				conns.grpcConnection[k] = conns.grpcConnection[len(conns.grpcConnection)-1]
+				conns.grpcConnection = conns.grpcConnection[:len(conns.grpcConnection)-1]
+				conns.nConnections = len(conns.grpcConnection)
 				// Value found, so no need (and very unwanted) to continue iteration since we effectively changed the iterator of the for inner for loop
 				break
 			}
 		}
 		mutex.Unlock()
-		log.Printf("INFO: cleanConnections(): Pool %s after clean: %v", pool, conns)
+		log.Printf("INFO: cleanConnections(): Pool %s after clean: %v", v.serviceName, conns)
 	}
 }
 
