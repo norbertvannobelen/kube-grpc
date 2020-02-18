@@ -39,6 +39,7 @@ type grpcConnection struct {
 var (
 	clientset       *kubernetes.Clientset
 	connectionCache = make(map[string]*connection)
+	mutex           = &sync.RWMutex{}
 )
 
 func init() {
@@ -71,6 +72,7 @@ func healthCheck() {
 		time.Sleep(time.Second)
 		// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
 		// The connections are a global variable
+		mutex.Lock()
 		for _, v := range connectionCache {
 			// Iterate over the connections while calling the provided ping function
 			dirtyConnections := make(chan *grpcConnection, len(v.grpcConnection))
@@ -86,6 +88,7 @@ func healthCheck() {
 			close(dirtyConnections)
 			cleanConnections(dirtyConnections)
 		}
+		mutex.Unlock()
 	}
 }
 
@@ -96,8 +99,6 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 		conns := connectionCache[v.serviceName]
 		// healthCheck and updatePool could both run this routine at the same time, leading to a change on range conns.grpcConnection
 		// and subsequent non-existent just found key. mutex.Lock should protect this code against race conditions.
-		var mutex = &sync.Mutex{}
-		mutex.Lock()
 		for k, gc := range conns.grpcConnection {
 			if gc == v {
 				// Remove connection from slice of connections
@@ -108,7 +109,6 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 				break
 			}
 		}
-		mutex.Unlock()
 		log.Printf("INFO: cleanConnections(): Pool %s after clean: %v", v.serviceName, conns)
 	}
 }
@@ -117,15 +117,18 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 func updatePool() {
 	for {
 		time.Sleep(time.Minute)
+		mutex.Lock()
 		for serviceName, v := range connectionCache {
 			log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
 			updateConnectionPool(serviceName, v.functions, v)
 		}
+		mutex.Unlock()
 	}
 }
 
 // Connect - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
 func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
+	mutex.Lock()
 	currentCache := connectionCache[serviceName]
 	if currentCache == nil {
 		c := &connection{
@@ -138,6 +141,7 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 	}
 	grcpConn := currentCache.grpcConnection[rand.Intn(currentCache.nConnections)]
 	log.Printf("INFO: Connect(): Chatting with service %s through grpc connection %+v", serviceName, grcpConn)
+	mutex.Unlock()
 	return grcpConn.grpcConnection, nil
 }
 
