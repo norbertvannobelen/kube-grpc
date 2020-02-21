@@ -30,6 +30,13 @@ type connection struct {
 	grpcConnection []*grpcConnection
 }
 
+type connArr struct {
+	functions   GrpcKubeBalancer
+	grpcConn    *grpcConnection
+	serviceName string
+	conn        *connection
+}
+
 type grpcConnection struct {
 	grpcConnection interface{}
 	connectionIP   string
@@ -37,9 +44,10 @@ type grpcConnection struct {
 }
 
 var (
-	clientset       *kubernetes.Clientset
-	connectionCache = make(map[string]*connection)
-	mutex           = &sync.RWMutex{}
+	clientset        *kubernetes.Clientset
+	connectionCache  = make(map[string]*connection)
+	mutex            = &sync.RWMutex{}
+	dirtyConnections = make(chan *grpcConnection)
 )
 
 func init() {
@@ -60,6 +68,7 @@ func init() {
 // If a connection has failed, the connection is removed from the pool and a scan is executed for new connections.
 // Every 60 seconds a full scan is done to check for new pods which might have been scaled into the pool
 func poolManager() {
+	go cleanConnections()
 	go healthCheck()
 	go updatePool()
 }
@@ -72,30 +81,37 @@ func healthCheck() {
 		time.Sleep(time.Second)
 		// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
 		// The connections are a global variable
+		a := make([]*connArr, 0)
 		mutex.Lock()
 		for _, v := range connectionCache {
 			// Iterate over the connections while calling the provided ping function
-			dirtyConnections := make(chan *grpcConnection, len(v.grpcConnection))
 			for _, c := range v.grpcConnection {
-				err := v.functions.Ping(c.grpcConnection)
-				if err != nil {
-					// Add to dirtyConnections channel:
-					log.Printf("INFO: healthcheck(): Pinging %d services with %d pods failed to ping %s at ip %s",
-						len(connectionCache), len(v.grpcConnection), c.serviceName, c.connectionIP)
-					dirtyConnections <- c
-				}
+				// Decouple mutex lock from actual ping to reduce lock time by using intermediate array for the pointers
+				a = append(a, &connArr{functions: v.functions, grpcConn: c})
 			}
-			close(dirtyConnections)
-			cleanConnections(dirtyConnections)
 		}
 		mutex.Unlock()
+		// Iterate over array of connection pointers
+		for _, v := range a {
+			go func(grpcConn *grpcConnection, f GrpcKubeBalancer) {
+				err := f.Ping(grpcConn)
+				if err != nil {
+					// Add to dirtyConnections channel:
+					log.Printf("INFO: healthcheck(): Failed to ping %s at ip %s",
+						grpcConn.serviceName, grpcConn.connectionIP)
+					dirtyConnections <- grpcConn
+				}
+			}(v.grpcConn, v.functions)
+		}
 	}
 }
 
 // cleanConnections - Processes the connections which are stale/can not be reached and removes them from the cache
-func cleanConnections(dirtyConnections chan *grpcConnection) {
+func cleanConnections() {
 	// Not using a channel for this since we want unique services to be updated only (And the map deduplicates the list automatically
-	for v := range dirtyConnections {
+	for {
+		v := <-dirtyConnections
+		mutex.Lock()
 		conns := connectionCache[v.serviceName]
 		// healthCheck and updatePool could both run this routine at the same time, leading to a change on range conns.grpcConnection
 		// and subsequent non-existent just found key. mutex.Lock should protect this code against race conditions.
@@ -110,6 +126,7 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 			}
 		}
 		log.Printf("INFO: cleanConnections(): Pool %s after clean: %v", v.serviceName, conns)
+		mutex.Unlock()
 	}
 }
 
@@ -117,12 +134,16 @@ func cleanConnections(dirtyConnections chan *grpcConnection) {
 func updatePool() {
 	for {
 		time.Sleep(time.Minute)
+		a := make([]*connArr, 0)
 		mutex.Lock()
 		for serviceName, v := range connectionCache {
+			a = append(a, &connArr{serviceName: serviceName, conn: v})
 			log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
-			updateConnectionPool(serviceName, v.functions, v)
 		}
 		mutex.Unlock()
+		for _, v := range a {
+			updateConnectionPool(v.serviceName, v.conn, true)
+		}
 	}
 }
 
@@ -141,7 +162,7 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 	}
 	if currentCache.nConnections == 0 {
 		var err error
-		currentCache, err = initCurrentCache(serviceName, f, currentCache)
+		currentCache, err = initCurrentCache(serviceName, currentCache)
 		if err != nil {
 			return nil, err
 		}
@@ -154,10 +175,10 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 
 // initCurrentCache - Tries to update the connection cache on connect.
 // If it fails, it will retry for max 3 times to see if the error encountered in transient in nature
-func initCurrentCache(serviceName string, f GrpcKubeBalancer, currentCache *connection) (*connection, error) {
+func initCurrentCache(serviceName string, currentCache *connection) (*connection, error) {
 	var err error
 	for i := 0; i < 3; i++ {
-		currentCache, err = updateConnectionPool(serviceName, f, currentCache)
+		currentCache, err = updateConnectionPool(serviceName, currentCache, false)
 		if err != nil {
 			switch err.Error() {
 			case "K8S interaction not possible, non-retryable":
@@ -175,7 +196,8 @@ func initCurrentCache(serviceName string, f GrpcKubeBalancer, currentCache *conn
 
 // updateConnectionPool - Sets up the actual connections in the connectionpool
 // Also capable of refreshing the pool
-func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *connection) (*connection, error) {
+// Depending on the access path, a sync.Lock might already be in place, lock (bool) false will skip locking in this function
+func updateConnectionPool(serviceName string, currentCache *connection, lock bool) (*connection, error) {
 	svc, namespace, err := getService(serviceName, clientset.CoreV1())
 	if err != nil {
 		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Error %v", serviceName, err)
@@ -183,13 +205,13 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 	}
 	pods, podErr := getPodsForSvc(svc, namespace, clientset.CoreV1())
 	if podErr != nil {
-		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Can not get pods. Error %v", serviceName, err)
+		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Can not get pods. Error %v",
+			serviceName, err)
 		return nil, errors.New("K8S interaction not possible, non-retryable")
 	}
 
 	log.Printf("INFO: updateConnectionPool(): #pods: %d found for service %s", len(pods.Items), serviceName)
 	// Evict from pool
-	dirtyConnections := make(chan *grpcConnection, len(currentCache.grpcConnection))
 	for _, p := range currentCache.grpcConnection {
 		evict := true
 		for _, pod := range pods.Items {
@@ -201,13 +223,18 @@ func updateConnectionPool(serviceName string, f GrpcKubeBalancer, currentCache *
 		}
 		if evict {
 			log.Printf("INFO: updateConnectionPool(): Evicting %s for %s", p.connectionIP, p.serviceName)
+			// decouple mutex
 			dirtyConnections <- p
 		}
 	}
-	close(dirtyConnections)
-	cleanConnections(dirtyConnections)
-	log.Printf("INFO: updateConnectionPool(): After evict pool for service %s in namespace %s: %+v", serviceName, namespace, currentCache)
+	log.Printf("INFO: updateConnectionPool(): After evict pool for service %s in namespace %s: %+v",
+		serviceName, namespace, currentCache)
 
+	// Lock only if required and at the last moment to prevent slow k8s query from locking all actions
+	if lock {
+		mutex.Lock()
+		defer mutex.Unlock()
+	}
 	// Add new connections to pool
 	for _, pod := range pods.Items {
 		// Check pool for  presense of podIP to prevent duplicate connections:
