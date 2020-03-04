@@ -82,7 +82,7 @@ func healthCheck() {
 		// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
 		// The connections are a global variable
 		a := make([]*connArr, 0)
-		mutex.Lock()
+		mutex.RLock()
 		for _, v := range connectionCache {
 			// Iterate over the connections while calling the provided ping function
 			for _, c := range v.grpcConnection {
@@ -90,7 +90,7 @@ func healthCheck() {
 				a = append(a, &connArr{functions: v.functions, grpcConn: c})
 			}
 		}
-		mutex.Unlock()
+		mutex.RUnlock()
 		// Iterate over array of connection pointers
 		for _, v := range a {
 			go func(grpcConn *grpcConnection, f GrpcKubeBalancer) {
@@ -135,12 +135,12 @@ func updatePool() {
 	for {
 		time.Sleep(time.Minute)
 		a := make([]*connArr, 0)
-		mutex.Lock()
+		mutex.RLock()
 		for serviceName, v := range connectionCache {
 			a = append(a, &connArr{serviceName: serviceName, conn: v})
 			log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
 		}
-		mutex.Unlock()
+		mutex.RUnlock()
 		for _, v := range a {
 			updateConnectionPool(v.serviceName, v.conn, true)
 		}
@@ -149,7 +149,10 @@ func updatePool() {
 
 // Connect - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
 func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
+	// Using Lock instead of RLock: Multiple connection requests can come in at high freq.
+	// Lock prevents trying to create multiple connections to the same target at once
 	mutex.Lock()
+	defer mutex.Unlock()
 	currentCache := connectionCache[serviceName]
 	if currentCache == nil {
 		c := &connection{
@@ -167,9 +170,8 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 			return nil, err
 		}
 	}
+	// Not reaching this with 0 connections in the pool (still within the same lock)
 	grcpConn := currentCache.grpcConnection[rand.Intn(currentCache.nConnections)]
-	// log.Printf("INFO: Connect(): Chatting with service %s through grpc connection %+v", serviceName, grcpConn)
-	mutex.Unlock()
 	return grcpConn.grpcConnection, nil
 }
 
@@ -198,6 +200,7 @@ func initCurrentCache(serviceName string, currentCache *connection) (*connection
 // Also capable of refreshing the pool
 // Depending on the access path, a sync.Lock might already be in place, lock (bool) false will skip locking in this function
 func updateConnectionPool(serviceName string, currentCache *connection, lock bool) (*connection, error) {
+	// Chat with k8s for service and pod information, slow not blocking action
 	svc, namespace, err := getService(serviceName, clientset.CoreV1())
 	if err != nil {
 		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Error %v", serviceName, err)
@@ -211,7 +214,15 @@ func updateConnectionPool(serviceName string, currentCache *connection, lock boo
 	}
 
 	log.Printf("INFO: updateConnectionPool(): #pods: %d found for service %s", len(pods.Items), serviceName)
+
 	// Evict from pool
+	// Disconnect locking reads and eviction channel:
+	a := make([]*grpcConnection, 0)
+	// bool lock prevents deadlocks
+	if lock {
+		// Use a read lock since we do not care if a connection is evicted multiple times (will just do nothing)
+		mutex.RLock()
+	}
 	for _, p := range currentCache.grpcConnection {
 		evict := true
 		for _, pod := range pods.Items {
@@ -224,11 +235,20 @@ func updateConnectionPool(serviceName string, currentCache *connection, lock boo
 		if evict {
 			log.Printf("INFO: updateConnectionPool(): Evicting %s for %s", p.connectionIP, p.serviceName)
 			// decouple mutex
-			dirtyConnections <- p
+			a = append(a, p)
 		}
 	}
-	log.Printf("INFO: updateConnectionPool(): After evict pool for service %s in namespace %s: %+v",
-		serviceName, namespace, currentCache)
+	if lock {
+		mutex.RUnlock()
+	}
+	// since channel dirtyConnections locks and a lock might already be in place, let cleanup run from go routine
+	// go routine will block until lock is released from either end of this function and fallback to caller,
+	// or no lock is in place in which case it might or might not lock until the next lock is called in this function
+	go func() {
+		for _, p := range a {
+			dirtyConnections <- p
+		}
+	}()
 
 	// Lock only if required and at the last moment to prevent slow k8s query from locking all actions
 	if lock {
