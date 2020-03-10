@@ -7,7 +7,8 @@ Kubernetes grpc round robin load balancer and availability connector.
 * Query k8s for pods to connect to by using the dynamic ip addresses assigned in the k8s services;
 * Connect to the full set of available pods. If there are multiple pods the connection availability goes up;
 * Cache connections to create connection pool from which connections are handed out;
-* Automatic refresh of connection pool to account for autoscaling environments, pod updates and pod crashes.
+* Automatic refresh of connection pool to account for autoscaling environments, pod updates and pod crashes;
+* Stays connected to pods even when service is removed (Does not reconnect when pods are restarted).
 
 ## Versioning
 
@@ -44,7 +45,7 @@ Implement the interface with the call back functions:
 
 ```go
 type i struct{}
-var iFunctions:=&i{} // This is send in every call to the kube-grpc package
+var iFunctions=&i{} // This is send in every call to the kube-grpc package
 
 // NewGrpcClient - Implementation requirement for connection pool
 func (*i) NewGrpcClient(conn *grpc.ClientConn) (interface{}, error) {
