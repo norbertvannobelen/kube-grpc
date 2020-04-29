@@ -20,6 +20,10 @@ Since the k8s API is used, the minor version in the release number has been used
 
 Release 1.17.x have been tested with k8s 1.13. to 1.17 and no issues have been observed.
 
+### Release 1.18.x
+
+Release 1.18.x have been tested with k8s 1.14. to 1.18 and no issues have been observed.
+
 ## Project state
 
 The project has been used in several dozen code bases before being made publicly available, thus adding some real world use and test experience.
