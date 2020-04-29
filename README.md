@@ -78,6 +78,34 @@ func someGrpcConnect() (someGrpc.someGrpcClient, error) {
 
 The package requires access to k8s to get the services from.
 
+### GKE requirements for clusters 1.14.10-gke.27 and up (and maybe down)
+
+The code has been tested on a running GKE cluster upgraded from 1.13 (or maybe older). This had a different set of rol bindings.
+
+The following gke requirements are there:
+
+* Compute account needs at minimum view rights on the kubernetes engine (see IAM in gcloud).
+* The ClusterRoleBinding might be missing on a fresh install leading to an error (`services is forbidden: User "system:serviceaccount:{YOURNAMESPACE}:default" cannot list resource "services" in API group "" in the namespace "{YOURNAMESPACE}"` or similar) when connecting to the k8s for the list of services and pods.
+
+To solve this second issue, the below ClusterRoleBinding can be used:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+ name: cluster-admin-binding
+subjects:
+- kind: User
+  name: system:serviceaccount:{YOURNAMESPACE}:default
+  apiGroup: ""
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: ""
+```
+
+A more narrow setup with just read rights should also be sufficient (samples are welcome).
+
 ## Performance
 
 The use of a lookup in a map to get the connection is slower than just connecting to a grpc interface without using this package. However in any reasonable size scenario, a service probably uses only a few other services, thus creating a map with a very limited set of keys. Also the number of targets to connect is most likely low (<10 replicas), thus leading to a very limited overhead.
