@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"context"
 
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
@@ -306,7 +307,7 @@ func getService(serviceName string, k8sClient typev1.CoreV1Interface) (*corev1.S
 		return nil, "", fmt.Errorf("Service name not according to convention defined in README. Service name: %s", serviceName)
 	}
 	namespace := serviceSlice[1]
-	svcs, err := k8sClient.Services(namespace).List(listOptions)
+	svcs, err := k8sClient.Services(namespace).List(context.Background(),listOptions)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -322,6 +323,6 @@ func getService(serviceName string, k8sClient typev1.CoreV1Interface) (*corev1.S
 func getPodsForSvc(svc *corev1.Service, namespace string, k8sClient typev1.CoreV1Interface) (*corev1.PodList, error) {
 	set := labels.Set(svc.Spec.Selector)
 	listOptions := metav1.ListOptions{LabelSelector: set.AsSelector().String()}
-	pods, err := k8sClient.Pods(namespace).List(listOptions)
+	pods, err := k8sClient.Pods(namespace).List(context.Background(),listOptions)
 	return pods, err
 }
