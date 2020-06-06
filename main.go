@@ -1,6 +1,7 @@
 package kubegrpc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -8,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"context"
 
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
@@ -31,9 +31,14 @@ type connection struct {
 	grpcConnection []*grpcConnection
 }
 
-type connArr struct {
-	functions   GrpcKubeBalancer
-	grpcConn    *grpcConnection
+// connHealth - Used to decouple events to reduce locking
+type connHealth struct {
+	functions GrpcKubeBalancer
+	grpcConn  *grpcConnection
+}
+
+// connUpdate - Used to decouple events to reduce locking
+type connUpdate struct {
 	serviceName string
 	conn        *connection
 }
@@ -42,6 +47,7 @@ type grpcConnection struct {
 	grpcConnection interface{}
 	connectionIP   string
 	serviceName    string
+	conn           *grpc.ClientConn
 }
 
 var (
@@ -82,13 +88,13 @@ func healthCheck() {
 		time.Sleep(time.Second)
 		// To prevent conflicts in the loops checking the connections, we use a channel without a listener active
 		// The connections are a global variable
-		a := make([]*connArr, 0)
+		a := make([]*connHealth, 0)
 		mutex.RLock()
 		for _, v := range connectionCache {
 			// Iterate over the connections while calling the provided ping function
 			for _, c := range v.grpcConnection {
 				// Decouple mutex lock from actual ping to reduce lock time by using intermediate array for the pointers
-				a = append(a, &connArr{functions: v.functions, grpcConn: c})
+				a = append(a, &connHealth{functions: v.functions, grpcConn: c})
 			}
 		}
 		mutex.RUnlock()
@@ -118,6 +124,7 @@ func cleanConnections() {
 		// and subsequent non-existent just found key. mutex.Lock should protect this code against race conditions.
 		for k, gc := range conns.grpcConnection {
 			if gc == v {
+				go v.conn.Close() // Close open connections just in case there is a non-implementation of the healthcheck or other failure making the connection not terminate
 				// Remove connection from slice of connections
 				conns.grpcConnection[k] = conns.grpcConnection[len(conns.grpcConnection)-1]
 				conns.grpcConnection = conns.grpcConnection[:len(conns.grpcConnection)-1]
@@ -135,11 +142,11 @@ func cleanConnections() {
 func updatePool() {
 	for {
 		time.Sleep(time.Minute)
-		a := make([]*connArr, 0)
+		a := make([]*connUpdate, 0)
 		mutex.RLock()
+		// Make a non-blocking array for update purposes
 		for serviceName, v := range connectionCache {
-			a = append(a, &connArr{serviceName: serviceName, conn: v})
-			log.Printf("INFO: updatePool(): Updating pool %s", serviceName)
+			a = append(a, &connUpdate{serviceName: serviceName, conn: v})
 		}
 		mutex.RUnlock()
 		for _, v := range a {
@@ -281,6 +288,9 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 		grpcConn, err := currentConnection.functions.NewGrpcClient(conn)
 		if err != nil {
 			// Connection could not be made, so abort, but still try next pods in list
+			if conn != nil {
+				conn.Close()
+			}
 			continue
 		}
 		// add to connection cache
@@ -288,6 +298,7 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 			connectionIP:   pod.Status.PodIP,
 			grpcConnection: grpcConn,
 			serviceName:    serviceName, // Added to make use of channel for cleaning up connections easier (compare on key)
+			conn:           conn,
 		})
 		currentConnection.nConnections = len(currentConnection.grpcConnection)
 		log.Printf("INFO: updateConnectionPool(): Created connection for service %s in namespace %s. Connection pool status %+v",
@@ -307,7 +318,7 @@ func getService(serviceName string, k8sClient typev1.CoreV1Interface) (*corev1.S
 		return nil, "", fmt.Errorf("Service name not according to convention defined in README. Service name: %s", serviceName)
 	}
 	namespace := serviceSlice[1]
-	svcs, err := k8sClient.Services(namespace).List(context.Background(),listOptions)
+	svcs, err := k8sClient.Services(namespace).List(context.Background(), listOptions)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -323,6 +334,6 @@ func getService(serviceName string, k8sClient typev1.CoreV1Interface) (*corev1.S
 func getPodsForSvc(svc *corev1.Service, namespace string, k8sClient typev1.CoreV1Interface) (*corev1.PodList, error) {
 	set := labels.Set(svc.Spec.Selector)
 	listOptions := metav1.ListOptions{LabelSelector: set.AsSelector().String()}
-	pods, err := k8sClient.Pods(namespace).List(context.Background(),listOptions)
+	pods, err := k8sClient.Pods(namespace).List(context.Background(), listOptions)
 	return pods, err
 }
