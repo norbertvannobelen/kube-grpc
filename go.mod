@@ -1,6 +1,5 @@
 require (
 	github.com/pkg/errors v0.9.1
-	google.golang.org/grpc v1.30.0
 	k8s.io/api v0.18.2
 	k8s.io/apimachinery v0.18.2
 	k8s.io/client-go v0.18.2
