@@ -8,7 +8,8 @@ Kubernetes grpc round robin load balancer and availability connector.
 * Connect to the full set of available pods. If there are multiple pods the connection availability goes up;
 * Cache connections to create connection pool from which connections are handed out;
 * Automatic refresh of connection pool to account for autoscaling environments, pod updates and pod crashes;
-* Stays connected to pods even when service is removed (Does not reconnect when pods are restarted).
+* Stays connected to pods even when service is removed (Does not reconnect when pods are restarted);
+* Exposes list of connections (read only) for load balancer purposes.
 
 ## Versioning
 
@@ -113,6 +114,12 @@ A more narrow setup with just read rights should also be sufficient (samples are
 ## Performance
 
 The use of a lookup in a map to get the connection is slower than just connecting to a grpc interface without using this package. However in any reasonable size scenario, a service probably uses only a few other services, thus creating a map with a very limited set of keys. Also the number of targets to connect is most likely low (<10 replicas), thus leading to a very limited overhead.
+
+## Writing an advanced load balancer with kube-grpc
+
+The kube-grpc package manages a pool of connections. The Connect(...) function arbitrarily returns a connection to use in the processes. In some applications however kube-grpc can also be used as a connection pool manager, and provides an interface for a more advanced way of load balancing where the developer wants to not have a random connection, but wants to manage traffic per connection (aka similar to http request based loadbalancing with Istio and k-native).
+
+To write an advanced load balancer, the developer needs to have access to the pool directly.
 
 ## Known limitations
 

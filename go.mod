@@ -1,3 +1,7 @@
+module github.com/norbertvannobelen/kube-grpc
+
+go 1.13
+
 require (
 	github.com/pkg/errors v0.9.1
 	k8s.io/api v0.18.2
@@ -6,6 +10,3 @@ require (
 	k8s.io/klog v1.0.0
 )
 
-module github.com/norbertvannobelen/kube-grpc
-
-go 1.13

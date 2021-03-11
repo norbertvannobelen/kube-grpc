@@ -28,13 +28,13 @@ type GrpcKubeBalancer interface {
 type connection struct {
 	nConnections   int // The number of connections
 	functions      GrpcKubeBalancer
-	grpcConnection []*grpcConnection
+	grpcConnection []*GrpcConnection
 }
 
 // connHealth - Used to decouple events to reduce locking
 type connHealth struct {
 	functions GrpcKubeBalancer
-	grpcConn  *grpcConnection
+	grpcConn  *GrpcConnection
 }
 
 // connUpdate - Used to decouple events to reduce locking
@@ -43,8 +43,9 @@ type connUpdate struct {
 	conn        *connection
 }
 
-type grpcConnection struct {
-	grpcConnection interface{}
+// GrpcConnction - Externally accessible grpc connection data for in pool array (from connection.grpcConnection)
+type GrpcConnection struct {
+	GrpcConnection interface{}
 	connectionIP   string
 	serviceName    string
 	conn           *grpc.ClientConn
@@ -54,7 +55,7 @@ var (
 	clientset        *kubernetes.Clientset
 	connectionCache  = make(map[string]*connection)
 	mutex            = &sync.RWMutex{}
-	dirtyConnections = make(chan *grpcConnection)
+	dirtyConnections = make(chan *GrpcConnection)
 )
 
 func init() {
@@ -100,8 +101,8 @@ func healthCheck() {
 		mutex.RUnlock()
 		// Iterate over array of connection pointers
 		for _, v := range a {
-			go func(grpcConn *grpcConnection, f GrpcKubeBalancer) {
-				err := f.Ping(grpcConn.grpcConnection)
+			go func(grpcConn *GrpcConnection, f GrpcKubeBalancer) {
+				err := f.Ping(grpcConn.GrpcConnection)
 				if err != nil {
 					// Add to dirtyConnections channel:
 					log.Printf("INFO: healthcheck(): Failed to ping %s at ip %s",
@@ -156,7 +157,19 @@ func updatePool() {
 }
 
 // Connect - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
+// Function wraps Pool function fior backward compatibility. Locking is managed by the pool function
 func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
+	_, grcpConn, err := Pool(serviceName, f)
+	if err != nil {
+		return nil, err
+	}
+	return grcpConn, nil
+}
+
+// Pool - Call to get a connection to the given service and namespace. Will initialize a connection if not yet initialized
+// Returns an array of grpcConnections. This array should be locked before any actions are written against it.
+// Also returns a singular connection so that the Connect function can use the Pool function without having to implement its own locking
+func Pool(serviceName string, f GrpcKubeBalancer) ([]*GrpcConnection, interface{}, error) {
 	// Using Lock instead of RLock: Multiple connection requests can come in at high freq.
 	// Lock prevents trying to create multiple connections to the same target at once
 	mutex.Lock()
@@ -166,7 +179,7 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 		currentConnection = &connection{
 			nConnections:   0,
 			functions:      f,
-			grpcConnection: make([]*grpcConnection, 0),
+			grpcConnection: make([]*GrpcConnection, 0),
 		}
 		connectionCache[serviceName] = currentConnection
 	}
@@ -179,7 +192,7 @@ func Connect(serviceName string, f GrpcKubeBalancer) (interface{}, error) {
 	}
 	// Not reaching this with 0 connections in the pool (still within the same lock)
 	grcpConn := currentConnection.grpcConnection[rand.Intn(currentConnection.nConnections)]
-	return grcpConn.grpcConnection, nil
+	return currentConnection.grpcConnection, grcpConn.GrpcConnection, nil
 }
 
 // initCurrentConnection - Tries to update the connection cache on connect.
@@ -224,7 +237,7 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 
 	// Evict from pool
 	// Disconnect locking reads and eviction channel:
-	a := make([]*grpcConnection, 0)
+	a := make([]*GrpcConnection, 0)
 	// bool lock prevents deadlocks
 	if lock {
 		// Use a read lock since we do not care if a connection is evicted multiple times (will just do nothing)
@@ -294,9 +307,9 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 			continue
 		}
 		// add to connection cache
-		currentConnection.grpcConnection = append(currentConnection.grpcConnection, &grpcConnection{
+		currentConnection.grpcConnection = append(currentConnection.grpcConnection, &GrpcConnection{
 			connectionIP:   pod.Status.PodIP,
-			grpcConnection: grpcConn,
+			GrpcConnection: grpcConn,
 			serviceName:    serviceName, // Added to make use of channel for cleaning up connections easier (compare on key)
 			conn:           conn,
 		})
