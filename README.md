@@ -23,7 +23,7 @@ Release 1.17.x have been tested with k8s 1.13. to 1.17 and no issues have been o
 
 ### Release 1.18.x
 
-Release 1.18.x have been tested with k8s 1.14. to 1.20 and no issues have been observed.
+Release 1.18.x have been tested with k8s 1.14. to 1.21 and no issues have been observed.
 
 ## Project state
 
