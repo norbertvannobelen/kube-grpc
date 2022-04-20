@@ -53,7 +53,7 @@ type GrpcConnection struct {
 
 var (
 	clientset        *kubernetes.Clientset
-	connectionCache  = make(map[string]*connection)
+	connectionCache  = make(map[string]*connection) // contains all managed connections
 	mutex            = &sync.RWMutex{}
 	dirtyConnections = make(chan *GrpcConnection)
 )
@@ -187,12 +187,27 @@ func Pool(serviceName string, f GrpcKubeBalancer) ([]*GrpcConnection, interface{
 		var err error
 		err = initCurrentConnection(serviceName, currentConnection)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	// Not reaching this with 0 connections in the pool (still within the same lock)
 	grcpConn := currentConnection.grpcConnection[rand.Intn(currentConnection.nConnections)]
 	return currentConnection.grpcConnection, grcpConn.GrpcConnection, nil
+}
+
+// ListPool() - Returns the connections currently in the pool
+// Possible usages:
+// - Implement a secondary way to use connections initialized and managed by kube-grpc
+// usage: Unsafe if locking is not implemented correct: The returned value is a reference, not a copy!! Connections might be re-instantiated on crash or for other reasons.
+// The developer has to manage failures and might have to call this functions again to get a new/updated connection pool.
+func ListPool(serviceName string) []*GrpcConnection {
+	mutex.RLock()
+	defer mutex.RUnlock()
+	currentConnection := connectionCache[serviceName]
+	if currentConnection == nil {
+		return nil
+	}
+	return currentConnection.grpcConnection
 }
 
 // initCurrentConnection - Tries to update the connection cache on connect.
