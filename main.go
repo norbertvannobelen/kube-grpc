@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -62,11 +63,11 @@ func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		log.Fatalf("ERROR: init(): Could not get kube config in cluster. Error:" + err.Error())
+		log.Fatalf("(kube-grpc) FATAL: init(): Could not get kube config in cluster. Error: %v", err)
 	}
 	clientset, err = kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Fatalf("ERROR: init(): Could not connect to kube cluster with config. Error:" + err.Error())
+		log.Fatalf("(kube-grpc) FATAL: init(): Could not connect to kube cluster with config. Error: %v", err)
 	}
 	poolManager()
 }
@@ -105,7 +106,7 @@ func healthCheck() {
 				err := f.Ping(grpcConn.GrpcConnection)
 				if err != nil {
 					// Add to dirtyConnections channel:
-					log.Printf("INFO: healthcheck(): Failed to ping %s at ip %s",
+					log.Printf("(kube-grpc) INFO: healthcheck(): Failed to ping %s at ip %s",
 						grpcConn.serviceName, grpcConn.connectionIP)
 					dirtyConnections <- grpcConn
 				}
@@ -134,7 +135,7 @@ func cleanConnections() {
 				break
 			}
 		}
-		log.Printf("INFO: cleanConnections(): Pool %s after clean: %v", v.serviceName, conns)
+		log.Printf("(kube-grpc) INFO: cleanConnections(): Pool %s after clean: %v", v.serviceName, conns)
 		mutex.Unlock()
 	}
 }
@@ -184,8 +185,7 @@ func Pool(serviceName string, f GrpcKubeBalancer) ([]*GrpcConnection, interface{
 		connectionCache[serviceName] = currentConnection
 	}
 	if currentConnection.nConnections == 0 {
-		var err error
-		err = initCurrentConnection(serviceName, currentConnection)
+		err := initCurrentConnection(serviceName, currentConnection)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -220,7 +220,7 @@ func initCurrentConnection(serviceName string, currentConnection *connection) er
 			switch err.Error() {
 			case "K8S interaction not possible, non-retryable":
 				return err
-			case "No connections made, retry later":
+			case "no connections made, retry later":
 				// Sleep a second (which is about a lifetime in well configured system)
 				time.Sleep(time.Second)
 				continue
@@ -238,17 +238,17 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 	// Chat with k8s for service and pod information, slow not blocking action
 	svc, namespace, err := getService(serviceName, clientset.CoreV1())
 	if err != nil {
-		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Error %v", serviceName, err)
+		log.Printf("(kube-grpc) ERROR: updateConnectionPool(): Problem updating pool for service %s. Error %v", serviceName, err)
 		return errors.New("K8S interaction not possible, non-retryable")
 	}
 	pods, podErr := getPodsForSvc(svc, namespace, clientset.CoreV1())
 	if podErr != nil {
-		log.Printf("ERROR: updateConnectionPool(): Problem updating pool for service %s. Can not get pods. Error %v",
+		log.Printf("(kube-grpc) ERROR: updateConnectionPool(): Problem updating pool for service %s. Can not get pods. Error %v",
 			serviceName, err)
 		return errors.New("K8S interaction not possible, non-retryable")
 	}
 
-	log.Printf("INFO: updateConnectionPool(): %d pods listed by k8s for service %s", len(pods.Items), serviceName)
+	log.Printf("(kube-grpc) INFO: updateConnectionPool(): %d pods listed by k8s for service %s", len(pods.Items), serviceName)
 
 	// Evict from pool
 	// Disconnect locking reads and eviction channel:
@@ -262,13 +262,13 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 		evict := true
 		for _, pod := range pods.Items {
 			if p.connectionIP == pod.Status.PodIP {
-				log.Printf("INFO: updateConnectionPool(): Not evicting %s for %s", p.connectionIP, p.serviceName)
+				log.Printf("(kube-grpc) INFO: updateConnectionPool(): Not evicting %s for %s", p.connectionIP, p.serviceName)
 				evict = false
 				break
 			}
 		}
 		if evict {
-			log.Printf("INFO: updateConnectionPool(): Evicting %s for %s", p.connectionIP, p.serviceName)
+			log.Printf("(kube-grpc) INFO: updateConnectionPool(): Evicting %s for %s", p.connectionIP, p.serviceName)
 			// decouple mutex
 			a = append(a, p)
 		}
@@ -310,9 +310,13 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 		}
 		portSlice := strings.Split(serviceName, ":")
 		if len(portSlice) < 2 {
-			log.Fatalf("updateConnectionPool(): No port number supplied in service as stated in README")
+			log.Fatalf("(kube-grpc) FATAL: updateConnectionPool(): No port number supplied in service as stated in README")
 		}
-		conn, err := grpc.Dial(pod.Status.PodIP+":"+portSlice[1], grpc.WithInsecure())
+		conn, err := grpc.Dial(pod.Status.PodIP+":"+portSlice[1], grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			// Connection could not be made, so abort, but still try next pods in list
+			continue
+		}
 		grpcConn, err := currentConnection.functions.NewGrpcClient(conn)
 		if err != nil {
 			// Connection could not be made, so abort, but still try next pods in list
@@ -329,12 +333,12 @@ func updateConnectionPool(serviceName string, currentConnection *connection, loc
 			conn:           conn,
 		})
 		currentConnection.nConnections = len(currentConnection.grpcConnection)
-		log.Printf("INFO: updateConnectionPool(): Created connection for service %s in namespace %s. Connection pool status %+v",
+		log.Printf("(kube-grpc) INFO: updateConnectionPool(): Created connection for service %s in namespace %s. Connection pool status %+v",
 			serviceName, namespace, currentConnection)
 	}
 	// Connection pool update might have lead to no connections at all, return appropriate error:
 	if currentConnection.nConnections == 0 {
-		return errors.New("No connections made, retry later")
+		return errors.New("no connections made, retry later")
 	}
 	return nil
 }
@@ -343,12 +347,12 @@ func getService(serviceName string, k8sClient typev1.CoreV1Interface) (*corev1.S
 	listOptions := metav1.ListOptions{}
 	serviceSlice := strings.Split(serviceName, ".")
 	if len(serviceSlice) < 2 {
-		return nil, "", fmt.Errorf("Service name not according to convention defined in README. Service name: %s", serviceName)
+		return nil, "", fmt.Errorf("service name not according to convention defined in README. Service name: %s", serviceName)
 	}
 	namespace := serviceSlice[1]
 	svcs, err := k8sClient.Services(namespace).List(context.Background(), listOptions)
 	if err != nil {
-		log.Fatal(err)
+		return nil, "", fmt.Errorf("cannot retrieve the services list via the k8s API. Error: %v", err)
 	}
 	svcComponents := strings.Split(serviceName, ".")
 	for _, svc := range svcs.Items {
